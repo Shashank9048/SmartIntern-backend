@@ -1,4 +1,9 @@
 fastapi
 uvicorn
 motor
-dnspython
+beanie
+python-jose[cryptography]
+passlib[bcrypt]
+google-generativeai
+python-multipart
+pydantic
