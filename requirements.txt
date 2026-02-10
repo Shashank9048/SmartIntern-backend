@@ -4,6 +4,8 @@ motor
 beanie
 python-jose[cryptography]
 passlib[bcrypt]
+bcrypt
 google-generativeai
 python-multipart
 pydantic
+pydantic[email]
