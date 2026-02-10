@@ -8,20 +8,30 @@ from typing import Optional
 from datetime import datetime
 import os
 
-# Import modules from the same folder
-from .models import Application, User, UserAuth, Token
-from .auth import get_password_hash, verify_password, create_access_token, get_current_user
-from .ai_utils import analyze_resume_ai, generate_cold_email_ai, chat_with_gemini
+# --- SAFE IMPORTS (Fixes Vercel 500 Error) ---
+try:
+    # Try relative imports (Works locally)
+    from .models import Application, User, UserAuth, Token
+    from .auth import get_password_hash, verify_password, create_access_token, get_current_user
+    from .ai_utils import analyze_resume_ai, generate_cold_email_ai, chat_with_gemini
+except ImportError:
+    # Try absolute imports (Works on Vercel)
+    from api.models import Application, User, UserAuth, Token
+    from api.auth import get_password_hash, verify_password, create_access_token, get_current_user
+    from api.ai_utils import analyze_resume_ai, generate_cold_email_ai, chat_with_gemini
 
 # --- LIFESPAN (Database Connection) ---
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     mongo_url = os.environ.get("MONGODB_URL")
     if mongo_url:
-        client = AsyncIOMotorClient(mongo_url)
-        # Initialize Beanie with all models
-        await init_beanie(database=client["smart_intern_tracker"], document_models=[Application, User])
-        print("✅ Database Connected")
+        try:
+            client = AsyncIOMotorClient(mongo_url)
+            # Initialize Beanie with all models
+            await init_beanie(database=client["smart_intern_tracker"], document_models=[Application, User])
+            print("✅ Database Connected")
+        except Exception as e:
+            print(f"❌ Database Connection Error: {e}")
     else:
         print("⚠️ WARNING: MONGODB_URL not found")
     yield
@@ -39,14 +49,13 @@ app.add_middleware(
 
 # --- ROUTES ---
 
-@app.get("/")
-def root():
-    return {"status": "Backend Running", "modules": ["Auth", "AI", "CRUD", "Automation"]}
+@app.get("/api/health")
+def health_check():
+    return {"status": "ok", "message": "Backend is running!"}
 
 # 1. AUTHENTICATION
-@app.post("/auth/signup")
+@app.post("/api/auth/signup")
 async def signup(user_data: UserAuth):
-    # Check if DB is connected (Beanie initialized)
     try:
         existing_user = await User.find_one(User.email == user_data.email)
         if existing_user:
@@ -57,9 +66,10 @@ async def signup(user_data: UserAuth):
         await new_user.insert()
         return {"message": "User created"}
     except Exception as e:
+        print(f"Signup Error: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
-@app.post("/auth/login", response_model=Token)
+@app.post("/api/auth/login", response_model=Token)
 async def login(user_data: UserAuth):
     user = await User.find_one(User.email == user_data.email)
     if not user or not verify_password(user_data.password, user.hashed_password):
@@ -69,17 +79,17 @@ async def login(user_data: UserAuth):
     return {"access_token": access_token, "token_type": "bearer"}
 
 # 2. APPLICATIONS CRUD (Protected)
-@app.get("/applications")
+@app.get("/api/applications")
 async def get_apps(current_user: str = Depends(get_current_user)):
     return await Application.find(Application.user_email == current_user).to_list()
 
-@app.post("/applications")
+@app.post("/api/applications")
 async def create_app(app_data: Application, current_user: str = Depends(get_current_user)):
-    app_data.user_email = current_user # Auto-assign user
+    app_data.user_email = current_user 
     await app_data.insert()
     return app_data
 
-@app.delete("/applications/{id}")
+@app.delete("/api/applications/{id}")
 async def delete_app(id: PydanticObjectId, current_user: str = Depends(get_current_user)):
     app = await Application.get(id)
     if app and app.user_email == current_user:
@@ -87,7 +97,7 @@ async def delete_app(id: PydanticObjectId, current_user: str = Depends(get_curre
         return {"message": "Deleted"}
     raise HTTPException(404, "Not found")
 
-@app.patch("/applications/{id}")
+@app.patch("/api/applications/{id}")
 async def update_status(id: PydanticObjectId, status: str, current_user: str = Depends(get_current_user)):
     app = await Application.get(id)
     if app and app.user_email == current_user:
@@ -101,7 +111,7 @@ class AnalyzeRequest(BaseModel):
     resume_text: str
     job_description: str
 
-@app.post("/ai/analyze")
+@app.post("/api/ai/analyze")
 async def ai_analyze(req: AnalyzeRequest, current_user: str = Depends(get_current_user)):
     analysis = await analyze_resume_ai(req.resume_text, req.job_description)
     return analysis
@@ -109,7 +119,7 @@ async def ai_analyze(req: AnalyzeRequest, current_user: str = Depends(get_curren
 class EmailRequest(BaseModel):
     job_description: str
 
-@app.post("/ai/cold-email")
+@app.post("/api/ai/cold-email")
 async def ai_email(req: EmailRequest, current_user: str = Depends(get_current_user)):
     email_body = await generate_cold_email_ai(req.job_description)
     return {"email": email_body}
@@ -119,20 +129,19 @@ class ChatRequest(BaseModel):
     message: str
     context: Optional[str] = ""
 
-@app.post("/ai/chat")
+@app.post("/api/ai/chat")
 async def ai_chat(req: ChatRequest, current_user: str = Depends(get_current_user)):
     response = await chat_with_gemini(req.message, context=req.context)
     return {"reply": response}
 
-# 5. SMART AUTOMATION & REMINDERS
-@app.get("/automation/run")
+# 5. SMART AUTOMATION
+@app.get("/api/automation/run")
 async def run_automation(current_user: str = Depends(get_current_user)):
     apps = await Application.find(Application.user_email == current_user).to_list()
     notifications = []
     today = datetime.now()
     
     for app in apps:
-        # Check for upcoming interview
         if app.next_action_date:
             diff = (app.next_action_date - today).total_seconds() / 3600
             if 0 < diff < 24:
@@ -142,7 +151,6 @@ async def run_automation(current_user: str = Depends(get_current_user)):
                     "message": f"🚀 Good luck! Interview with {app.company} is tomorrow!"
                 })
 
-        # Check for stale applications
         days_since_applied = (today - app.applied_date).days
         if app.status == "Applied" and days_since_applied > 14:
              notifications.append({
